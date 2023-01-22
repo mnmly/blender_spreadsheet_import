@@ -1,5 +1,5 @@
 bl_info = {
-    "name": "Spreadsheet Data Importer",
+    "name": "Geo Data Importer",
     "author": "Simon Broggi",
     "version": (0, 2, 0),
     "blender": (3, 3, 0),
@@ -9,9 +9,77 @@ bl_info = {
 }
 
 import bpy
+import numpy as np
+import sys
 from bpy_extras.io_utils import ImportHelper
-import json
+import subprocess
+from pathlib import Path
+
 import csv
+import json
+
+py_path = Path(sys.prefix) / "bin"
+py_exec = next(py_path.glob("python*"))
+
+try:
+    import geopandas as gpd
+except ImportError:
+    subprocess.call([py_exec, "-m", "pip", "install", "geopandas"])
+    import geopandas as gpd
+
+class DataField:
+    def __init__(self, name, dataType):
+        self.name = name
+        self.dataType =  dataType
+
+def read_gpkg_data(context, filepath, data_layer_name, data_fields):
+    report_type = 'INFO'
+    report_message = ""
+    gdf = gpd.read_file(filepath, layer=data_layer_name if len(data_layer_name) > 0 else 0)
+
+    data_name = "imported_data"
+    mesh = bpy.data.meshes.new(name="gpkg_"+data_layer_name)
+    mesh.vertices.add(len(gdf))
+
+    # add custom data
+    add_data_fields(mesh, data_fields)
+    enum_maps = {}
+    for col in data_fields:
+        if col.dataType == 'ENUM':
+            unique_val = gdf[col.name].unique()
+            d = enum_maps[col.name] = dict(zip(unique_val, list(range(len(unique_val)))))
+
+    for col in data_fields:
+        if col.dataType == 'ENUM':
+            v = gdf[col.name].map(enum_maps[col.name]).to_numpy()
+            mesh.attributes[col.name].data.foreach_set('value', v)
+        else:
+            mesh.attributes[col.name].data.foreach_set('value', gdf[col.name].to_numpy())
+    v = np.array(list(zip(gdf.geometry.x, gdf.geometry.y, [0] * len(gdf)))).reshape(-1)
+    mesh.vertices.foreach_set('co', v)
+
+    # for k in range(len(gdf)):
+    #     l = gdf.iloc[k]
+    #     for col in data_fields:
+    #         if col.dataType == 'ENUM':
+    #             v = enum_maps[col.name][l[col.name]]
+    #         else:
+    #             v = l[col.name]
+    #         mesh.attributes[col.name].data[k].value = v
+    #         # mesh.attributes[col.name].data.foreach('value', v)
+    #     mesh.vertices[k].co = (l.geometry.x, l.geometry.y,0.0) # set vertex x position according to index
+
+    mesh.update()
+    mesh.validate()
+
+    file_name = bpy.path.basename(filepath)
+    object_name = bpy.path.display_name(file_name)
+    create_object(mesh, object_name)
+    
+    report_message = "Imported {num_values} from \"{file_name}\"".format(num_values=len(gdf), file_name=file_name)
+
+    return report_message, report_type
+
 
 def read_json_data(context, filepath, data_array_name, data_fields, encoding='utf-8-sig'):
 
@@ -149,7 +217,7 @@ def read_csv_data(context, filepath, data_fields, encoding='latin-1', delimiter=
 def add_data_fields(mesh, data_fields):
     # add custom data
     for data_field in data_fields:
-        mesh.attributes.new(name=data_field.name if data_field.name else "empty_key_string", type=data_field.dataType, domain='POINT')
+        mesh.attributes.new(name=data_field.name if data_field.name else "empty_key_string", type=data_field.dataType if data_field.dataType != 'ENUM' else 'INT', domain='POINT')
 
 def create_object(mesh, name):
     # Create new object
@@ -194,7 +262,7 @@ class DataFieldPropertiesGroup(bpy.types.PropertyGroup):
             ('FLOAT', "Float", "Floating-point value"),
             ('INT', "Integer", "32-bit integer"),
             ('BOOLEAN', "Boolean", "True or false"),
-            # ('STRING', "String", "Text string"), # string wont work
+            ('ENUM', "ENUM", "Enums"), # string wont work
         ),
         default='FLOAT',
     )
@@ -215,7 +283,7 @@ class ImportSpreadsheetData(bpy.types.Operator, ImportHelper):
     # to the class instance from the operator settings before calling.
 
     filter_glob: bpy.props.StringProperty(
-        default="*.json;*.csv",
+        default="*.json;*.csv;*.gpkg",
         options={'HIDDEN'},
         maxlen=255,  # Max internal buffer length, longer would be clamped.
     )
@@ -280,6 +348,8 @@ class ImportSpreadsheetData(bpy.types.Operator, ImportHelper):
             report_message, report_type = read_json_data(context, self.filepath, self.array_name, self.data_fields, self.json_encoding)
         elif(self.filepath.endswith('.csv')):
             report_message, report_type = read_csv_data(context, self.filepath, self.data_fields, self.csv_encoding, self.csv_delimiter, self.csv_leading_lines_to_discard)
+        elif(self.filepath.endswith('.gpkg')):
+            report_message, report_type = read_gpkg_data(context, self.filepath, self.array_name, self.data_fields)
         
         self.report({report_type}, report_message)
         return {'FINISHED'}
@@ -308,6 +378,24 @@ class RemoveDataFieldOperator(bpy.types.Operator):
         operator.data_fields.remove(index)
         operator.active_data_field_index = min(max(0,index - 1), len(operator.data_fields)-1)
         return {'FINISHED'}
+
+class SPREADSHEET_PT_gpkg_options(bpy.types.Panel):
+    bl_space_type = 'FILE_BROWSER'
+    bl_region_type = 'TOOL_PROPS'
+    bl_label = "JSON Import Options"
+    bl_parent_id = "FILE_PT_operator"
+
+    @classmethod
+    def poll(cls, context):
+        sfile = context.space_data
+        operator = sfile.active_operator
+        return operator.bl_idname == "IMPORT_OT_spreadsheet" and operator.filepath.lower().endswith('.gpkg')
+
+    def draw(self, context):
+        sfile = context.space_data
+        operator = sfile.active_operator
+        layout = self.layout
+        layout.prop(data=operator, property="array_name")
 
 class SPREADSHEET_PT_json_options(bpy.types.Panel):
     bl_space_type = 'FILE_BROWSER'
@@ -387,6 +475,7 @@ blender_classes = [
     DataFieldPropertiesGroup,
     ImportSpreadsheetData,
     SPREADSHEET_PT_field_names,
+    SPREADSHEET_PT_gpkg_options,
     SPREADSHEET_PT_json_options,
     SPREADSHEET_PT_csv_options,
     AddDataFieldOperator,
@@ -395,7 +484,7 @@ blender_classes = [
 
 # Only needed if you want to add into a dynamic menu
 def menu_func_import(self, context):
-    self.layout.operator(ImportSpreadsheetData.bl_idname, text="Spreadsheet Import (.csv, .json)")
+    self.layout.operator(ImportSpreadsheetData.bl_idname, text="Spreadsheet Import (.csv, .json, .gpkg)")
 
 # Register and add to the "file selector" menu (required to use F3 search "Text Import Operator" for quick access)
 def register():
