@@ -17,15 +17,17 @@ from pathlib import Path
 
 import csv
 import json
+import itertools
 
 py_path = Path(sys.prefix) / "bin"
 py_exec = next(py_path.glob("python*"))
 
 try:
     import geopandas as gpd
+    from shapely import geometry, ops
 except ImportError:
+    print('INSTALLING geopandas')
     subprocess.call([py_exec, "-m", "pip", "install", "geopandas"])
-    import geopandas as gpd
 
 class DataField:
     def __init__(self, name, dataType):
@@ -35,12 +37,9 @@ class DataField:
 def read_gpkg_data(context, filepath, data_layer_name, data_fields):
     report_type = 'INFO'
     report_message = ""
-    gdf = gpd.read_file(filepath, layer=data_layer_name if len(data_layer_name) > 0 else 0)
-
     data_name = "imported_data"
+    gdf = gpd.read_file(filepath, layer=data_layer_name if len(data_layer_name) > 0 else 0)
     mesh = bpy.data.meshes.new(name="gpkg_"+data_layer_name)
-    mesh.vertices.add(len(gdf))
-
     # add custom data
     add_data_fields(mesh, data_fields)
     enum_maps = {}
@@ -50,24 +49,42 @@ def read_gpkg_data(context, filepath, data_layer_name, data_fields):
             d = enum_maps[col.name] = dict(zip(unique_val, list(range(len(unique_val)))))
 
     for col in data_fields:
+        gdf_col = gdf[col.name]
         if col.dataType == 'ENUM':
-            v = gdf[col.name].map(enum_maps[col.name]).to_numpy()
-            mesh.attributes[col.name].data.foreach_set('value', v)
+            v = gdf_col.map(enum_maps[col.name]).to_numpy().astype('uint8')
         else:
-            mesh.attributes[col.name].data.foreach_set('value', gdf[col.name].to_numpy())
-    v = np.array(list(zip(gdf.geometry.x, gdf.geometry.y, [0] * len(gdf)))).reshape(-1)
-    mesh.vertices.foreach_set('co', v)
+            v = gdf_col.to_numpy()
+        mesh.attributes[col.name].data.foreach_set('value', v)
 
-    # for k in range(len(gdf)):
-    #     l = gdf.iloc[k]
-    #     for col in data_fields:
-    #         if col.dataType == 'ENUM':
-    #             v = enum_maps[col.name][l[col.name]]
-    #         else:
-    #             v = l[col.name]
-    #         mesh.attributes[col.name].data[k].value = v
-    #         # mesh.attributes[col.name].data.foreach('value', v)
-    #     mesh.vertices[k].co = (l.geometry.x, l.geometry.y,0.0) # set vertex x position according to index
+    first_geom = gdf.geometry[0]
+    v = []
+    if 'LineString' in first_geom.geom_type:
+
+        # for each geometry
+        # if the geometry is non multi line string, it retrieves coords directly
+        # if not we need to iterate over the `geoms` to flatten them into list of coordinates
+
+        linestring_set = [[(c[0], c[1], 0) for c in g.coords] if not 'Multi' in g.geom_type else\
+                          list(itertools.chain.from_iterable([[(c[0], c[1], 0) for c in coord] for coord in [geo.coords for geo in g.geoms]]))\
+                          for g in gdf.geometry]
+        index = 0
+        edges_list = []
+        for i, ls in enumerate(linestring_set):
+            start = index
+            end = index + (len(ls) - 1)
+            edges = [(i, i + 1) for i in range(start, end)]
+            edges_list.extend(edges)
+            index = end + 1
+
+        v = list(itertools.chain.from_iterable(linestring_set))
+        v = np.array(v).reshape(-1)
+        mesh.edges.add(len(edges_list))
+        mesh.edges.foreach_set('vertices', np.array(edges_list).reshape(-1))
+    elif 'Point' in first_geom.geom_type:
+        v = np.array(list(zip(gdf.geometry.x, gdf.geometry.y, [0] * len(gdf)))).reshape(-1)
+
+    mesh.vertices.add(len(v) / 3)
+    mesh.vertices.foreach_set('co', v)
 
     mesh.update()
     mesh.validate()
@@ -217,7 +234,7 @@ def read_csv_data(context, filepath, data_fields, encoding='latin-1', delimiter=
 def add_data_fields(mesh, data_fields):
     # add custom data
     for data_field in data_fields:
-        mesh.attributes.new(name=data_field.name if data_field.name else "empty_key_string", type=data_field.dataType if data_field.dataType != 'ENUM' else 'INT', domain='POINT')
+        mesh.attributes.new(name=data_field.name if data_field.name else "empty_key_string", type=data_field.dataType if data_field.dataType != 'ENUM' else 'INT8', domain='POINT')
 
 def create_object(mesh, name):
     # Create new object
