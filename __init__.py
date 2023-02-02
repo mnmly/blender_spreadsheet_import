@@ -83,7 +83,7 @@ def read_gpkg_data(context, filepath, data_layer_name, data_fields):
     elif 'Point' in first_geom.geom_type:
         v = np.array(list(zip(gdf.geometry.x, gdf.geometry.y, [0] * len(gdf)))).reshape(-1)
 
-    mesh.vertices.add(len(v) / 3)
+    mesh.vertices.add(len(v) // 3)
     mesh.vertices.foreach_set('co', v)
 
     mesh.update()
